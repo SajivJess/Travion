@@ -9,6 +9,7 @@
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
+   - 1.1 [Feature Catalog — Tools Used Per Feature](#11-feature-catalog--tools-used-per-feature)
 2. [System Architecture](#2-system-architecture)
 3. [Backend — NestJS](#3-backend--nestjs)
    - 3.1 [Module Map](#31-module-map)
@@ -59,6 +60,239 @@ Travion is a full-stack AI-powered travel itinerary platform. Unlike static itin
 | **Consent-based replanning** | System proposes changes; user explicitly accepts or dismisses |
 | **Cache-heavy** | Three-tier caching (memory → Supabase → API) prevents rate-limit abuse |
 | **AI rotation** | 4 Gemini keys + 5 SerpAPI keys rotated to maximise throughput |
+
+---
+
+### 1.1 Feature Catalog — Tools Used Per Feature
+
+Every user-facing feature maps directly to a specific combination of APIs, libraries, and infrastructure layers. This section is a complete reference for what was built and exactly what was used to build it.
+
+---
+
+#### 🗺️ AI Itinerary Generation
+> *Multi-day travel plan with per-activity costs, transport, hotel, food, and weather awareness — generated in one shot.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| AI model | Google Gemini 1.5 Flash | Generates structured JSON itinerary from enriched mega-prompt |
+| Hotel data | SerpAPI (Google Maps Hotels endpoint) | Fetches ranked hotels filtered by budget and star rating |
+| Restaurant data | SerpAPI (Google Search) | Finds top-rated restaurants per meal category |
+| Attractions | SerpAPI (Google Search) | Discovers POIs with ratings, review counts, entry fees |
+| Flight fares | Amadeus Flight Offers Search API | Cheapest round-trip fares for the travel dates + airports |
+| Airport lookup | Bundled `airports.json` (47 k entries) | Offline IATA code resolution — no API call needed |
+| Weather context | OpenWeatherMap 5-day forecast | Injects daily weather conditions into AI prompt |
+| Geo enrichment | Google Maps Geocoding API | Resolves destination → lat/lng, country, timezone |
+| Social crowd data | Apify + Instagram Hashtag Scraper | Crowd score per POI injected into AI prompt |
+| Orchestrator | NestJS `ItineraryService` | Coordinates all data fetches; builds and fires Gemini prompt |
+| JSON output repair | Custom regex sanitiser (inline) | Strips Gemini markdown fences / trailing commas before `JSON.parse` |
+| Queue runner | BullMQ `TripPlanningProcessor` | Executes pipeline asynchronously; emits Socket.IO progress events |
+| Persistence | Supabase `trips` table (JSONB) | Stores final `days[]` for retrieval |
+| Key rotation | 4 × `GEMINI_API_KEY` + 5 × `SERP_API_KEY` | Round-robin prevents single-key quota exhaustion |
+
+---
+
+#### ⛈️ Real-Time Weather Adaptation
+> *Monitors live forecasts for active trips; proposes activity replanning when storm or heavy rain is detected.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Weather data | OpenWeatherMap Current + 5-day API | Fetches 3-hour forecast steps for trip destination |
+| Background job | BullMQ `WeatherMonitorProcessor` (every 30 min) | Classifies severity per planned day |
+| Risk aggregation | `ImpactEngineService` | Combines weather severity with crowd + flight signals into unified `riskScore` |
+| Alert storage | Supabase `trip_updates` | Persists alert with `reason=weather`, affected activities JSONB, risk level |
+| AI replan | Google Gemini 1.5 Flash via `ReplanProcessor` | Generates weather-appropriate alternative activities |
+| Consent gate | In-memory `ProposedReplan` Map + REST | Proposal held until owner explicitly accepts or rejects |
+| Real-time push | Socket.IO `AgentGateway` — `trip:update` + `trip:proposal` | Notifies owner's browser immediately |
+
+---
+
+#### ✈️ Flight Delay Detection & Response
+> *Monitors departure/arrival status of planned flights; escalates to replan if delay exceeds 45 minutes.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Flight status | AviationStack API | Real-time delay in minutes, gate, cancellation flag per flight number |
+| Flight search | Amadeus Flight Offers Search API | Used at planning time for cheapest fares |
+| Background job | BullMQ `FlightDelayMonitorProcessor` (every 15 min) | Polls AviationStack for each active trip's booked flights |
+| Escalation logic | `QueueService.queueReplan()` | Triggers replan job if `delay_mins > 45` |
+| User notification | Socket.IO `trip:update` event | Pushes delay alert to all connected trip members |
+| Day adjustment | `ReplanProcessor` + Gemini | Adjusts Day 1 schedule to absorb the delay |
+
+---
+
+#### 📸 Social Crowd Intelligence
+> *Scrapes Instagram tourism hashtags to score how busy each POI currently is.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Data source | Apify actor `reGe1ST3OBgYZSsZJ` | Scrapes Instagram by tourism hashtags (e.g. `delhitourism`, `visitdelhi`, `delhiheritage`) |
+| Scoring algorithm | `InstagramService` (custom) | `post_volume × recency_weight × engagement_rate` → `crowdScore` (0–100) |
+| Tier-1 cache | In-process `Map` (6 h TTL) | Zero-latency hit within same server session |
+| Tier-2 cache | Supabase `instagram_cache` table | Persists across server restarts; checked before calling Apify |
+| Background refresh | BullMQ `CrowdMonitorProcessor` (every 2 h) | Keeps scores fresh for active trips |
+| API endpoint | `GET /api/itinerary/social-feed/:destination?pois=` | Returns `{ posts, crowdScore, trend }` per POI |
+| Frontend | `LiveDestinationFeed` React component | Renders crowd badges and top post thumbnails |
+
+---
+
+#### 🤖 Place Chatbot ("Ask about this place")
+> *Answers user questions about any POI using official government tourism page content — not hallucinations.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Web scraping | Jina Reader (`https://r.jina.ai/`) | Converts official tourism URL → clean markdown (timeout: 22 s) |
+| LLM | Mistral-7B-Instruct via OpenRouter | Answers question grounded strictly in Jina-provided content |
+| Tier-1 cache | In-process `Map` (24 h TTL) | Avoids re-scraping the same URL |
+| Tier-2 cache | Supabase `jina_cache` table | Persists scraped markdown; async write after fresh scrape |
+| Service | `ChatbotService` | Orchestrates Jina → cache → Mistral pipeline |
+| API endpoint | `POST /api/itinerary/chatbot` | `{ place, destination, question }` → `{ answer, source, sourceUrl }` |
+| Health check | `GET /api/itinerary/openrouter-health` | Pings OpenRouter; returns `{ ok, latencyMs, model }` |
+
+---
+
+#### 👥 Team Collaboration & Invite System
+> *Owner shares a 6-char code or shareable link; members join, react to activities, vote, and submit suggestions.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Auth | Supabase JWT | Identifies owner vs member; attached to all team API calls |
+| Invite generation | `InviteService` + Node.js `crypto.randomBytes` | 32-hex link token + 6-char alphanumeric code (e.g. `DEL6X9`) |
+| Capacity enforcement | `InviteService.generateInvite()` | Checks `joined_count < max_travelers` before creating invite |
+| Member storage | Supabase `trip_members`, `trip_invites` | Tracks role (`owner`/`member`), status, joined timestamp |
+| Activity reactions | `FeedbackService` + Supabase `activity_feedback` | 6 types: `looks_good`, `not_ideal`, `too_rushed`, `too_expensive`, `too_crowded`, `need_rest` |
+| Free-text suggestions | `SuggestionService` + Google Gemini NLP | Parses `"Too many museums"` → `{ parsed_activity, parsed_issue, parsed_suggestion }` |
+| Consensus voting | `ConsensusService` + Supabase `activity_feedback` | Aggregates agree/disagree/neutral; computes per-activity consensus score |
+| Frontend components | `InvitePanel`, `ActivityFeedback`, `SuggestionBox`, `OwnerAlertBanner` | React + Tailwind CSS + Framer Motion |
+
+---
+
+#### 📍 Live Trip Tracking
+> *Traveler checks in and out of each activity; system tracks schedule drift in real time.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Check-in persistence | Supabase `trip_checkins` | Stores `actual_time`, `checkout_time`, `status` per activity per user |
+| Drift calculation | `TripTrackerService` | Σ(actual_checkout − planned_end) across completed activities |
+| Completion tracking | `TripTrackerService` | `checked_out / total_activities × 100 = completion %` |
+| Skip support | `TripTrackerService.skipActivity()` | Marks activity as `skipped`; stores optional reason |
+| API endpoints | `POST /checkin`, `POST /checkout`, `POST /skip-activity`, `GET /tracking/:tripJobId` | Full CRUD over trip progress |
+| Frontend | `Trips.tsx` — Check In / Check Out / Skip buttons per activity card | React + Zustand `tripStore` |
+
+---
+
+#### 🕐 ETA Risk Detection
+> *After each check-in, calculates live travel time to the next activity and flags if the traveler is at risk of being late.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Travel time | Google Maps Distance Matrix API | Origin → destination travel time in minutes (driving / walking / transit) |
+| Risk classifier | `EtaMonitorService` | Available time vs (travel_time + 15 min buffer) → `on_time` / `at_risk` / `late` |
+| Audit log | Supabase `trip_eta_checks` | Every ETA assessment persisted for dashboard analytics |
+| Real-time alert | Socket.IO `eta:alert` event | Pushes `{ riskLevel, delayMins, nextActivity }` to browser |
+| API endpoint | `POST /api/itinerary/eta-check` | Called immediately after frontend check-in action |
+
+---
+
+#### 🧠 Autonomous Agent Loop
+> *Background AI brain that continuously assesses trip health and decides — without user prompting — whether to surface an alert or trigger a replan.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Orchestrator | BullMQ `AgentLoopProcessor` | Entry point triggered by monitors; runs the full assessment pipeline |
+| Risk scoring | `ImpactEngineService` | Weighted score: weather × 0.35 + crowd × 0.25 + flight × 0.30 + POI × 0.10 |
+| Tool execution | `AgentToolsService` | `checkActivityAvailability`, `getCurrentCrowdLevel`, `calculateTravelTime`, `findAlternativeActivity` |
+| Decision thresholds | Agent loop logic | `< 30` = OK; `30–69` = surface update; `≥ 70` = immediate replan proposal |
+| AI replan | Google Gemini 1.5 Flash | Generates replacement activities for all HIGH-risk items |
+| Audit | Supabase `trip_updates` + `trip_versions` | Every agent decision and accepted replan versioned immutably |
+| Real-time push | Socket.IO `AgentGateway` | All agent decisions pushed live to trip owner |
+
+---
+
+#### 📺 YouTube POI Discovery
+> *Surfaces the best YouTube travel video for each point of interest — so users can preview a place before visiting.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Video search | SerpAPI (YouTube search endpoint) | Queries `"[poi] [destination] travel tour"` → top video URL, thumbnail, duration |
+| Cache | Supabase `discovery_cache` (24 h TTL) | Prevents repeat searches for the same POI |
+| Service | `YoutubeDiscoveryService` | Search → cache read/write → response normalisation |
+| Frontend | `PoiVideoPreview` React component | YouTube embed card rendered per activity |
+| API endpoint | `GET /api/itinerary/poi-videos/:destination?pois=` | Accepts comma-separated POI list |
+
+---
+
+#### 📑 Itinerary Version History
+> *Every accepted AI replan creates an immutable snapshot — owner can see exactly what changed and why.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Storage | Supabase `trip_versions` table | Columns: `version` integer, `days` JSONB, `reason` text, `created_at` |
+| Write path | `QueueService.updateTripDays()` | Atomically patches `trips.days` + inserts new version row in one operation |
+| Read path | `GET /api/itinerary/trip-versions/:tripId` | Returns all versions chronologically for diff display |
+
+---
+
+#### 💳 Subscription & Billing
+> *Free tier (3 trips / 50 AI requests per month) and Pro tier (unlimited) gated by Dodo Payments.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Payment gateway | Dodo Payments REST API | Checkout session creation, hosted payment page, test/live mode toggle |
+| Webhook security | HMAC `whsec_*` signature verification | Verifies every incoming Dodo webhook before processing |
+| Plan enforcement | NestJS `UsageLimitGuard` + `@UsageLimit()` decorator | Queries Supabase `user_usage` per period; returns HTTP 429 on breach |
+| Subscription state | Supabase `user_subscriptions` | `plan` (`free`/`pro`), `period_end`, `status` per user |
+| Frontend | `Subscription.tsx` | Plan comparison cards, Dodo checkout redirect, current plan status badge |
+
+---
+
+#### 🔔 Real-Time Push Notifications
+> *Every background event — replan proposals, ETA alerts, trip updates — is pushed live to connected clients without polling.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Protocol | Socket.IO (WebSocket with long-poll fallback) | Persistent bidirectional connection per browser tab |
+| NestJS adapter | `@nestjs/platform-socket.io` + `@WebSocketGateway()` | Integrates Socket.IO with NestJS DI system |
+| Gateway | `AgentGateway` | Handles `connection`, `disconnect`, room joining by `tripJobId` |
+| Fan-out | `NotificationService` | `.to(tripId).emit(event, payload)` callable from any service anywhere in the backend |
+| Auth | Supabase JWT verified on socket `connection` event | Prevents unauthorised real-time connections |
+
+---
+
+#### 🔐 Authentication & Security
+> *Supabase email + magic-link auth; JWT verified server-side on all protected routes; per-tier rate limiting.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Identity provider | Supabase Auth | Email + password, magic link; issues short-lived JWTs |
+| Token verification | `AuthMiddleware` (NestJS `NestMiddleware`) | Reads `Authorization: Bearer`; verifies against Supabase JWKS endpoint |
+| Row-level security | Supabase RLS (enabled on all tables) | Service key bypasses; anon key restricted to own rows |
+| Input validation | `class-validator` + NestJS `ValidationPipe` (global) | DTO-level validation before any service is reached |
+| Rate limiting | `UsageLimitGuard` per endpoint | Usage counted per user per calendar month in Supabase |
+| Frontend auth UI | `AuthModal.tsx` + Zustand `authStore` | Login/signup; Supabase SDK persists session in `localStorage` |
+
+---
+
+#### 🗺️ POI Closure Monitoring
+> *Proactively checks if a planned attraction will be temporarily closed before the traveler arrives.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Status check | SerpAPI (Google Search — business hours/status) | Queries current opening status for each planned attraction |
+| Background job | BullMQ `PoiMonitorProcessor` (every 6 h) | Checks all POIs across all active trips |
+| Alert | Supabase `trip_updates` + Socket.IO | `reason=poi_closed` update with nearest open alternative |
+| Replacement | `AgentToolsService.findAlternativeActivity()` + Gemini | AI picks geographically close substitute with similar category |
+
+---
+
+#### 🚆 Multi-Modal Transport Planning
+> *Realistic transfer times and cost estimates between every pair of activities across all travel modes.*
+
+| Layer | Tool | Role |
+|---|---|---|
+| Route calculation | Google Maps Directions API + Distance Matrix API | Driving, walking, and transit travel time + distance between activity pairs |
+| Domestic India rail | `EasemytripService` (Cheerio HTML scraper) | Intercity train fares and duration for Indian routes |
+| Intra-city options | `TransportService` | Cab, auto-rickshaw, bus, metro — cost model + time per mode |
+| Injection into plan | `ItineraryService` post-processing stage | `transport` block inserted between consecutive activities in `days[]` |
 
 ---
 
