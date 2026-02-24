@@ -1,0 +1,84 @@
+# -----------------------------------------------------------------------------
+# TRAVION — .gitignore
+# -----------------------------------------------------------------------------
+
+
+# --- Secrets / Environment ----------------------------------------------------
+.env
+.env.local
+.env.*.local
+travion_backend/.env
+travion_web/.env
+travion_web/.env.local
+
+
+# --- Node / npm ---------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+
+
+# --- TypeScript build output --------------------------------------------------
+dist/
+build/
+*.tsbuildinfo
+travion_backend/dist/
+travion_web/dist/
+
+
+# --- Vite ---------------------------------------------------------------------
+travion_web/.vite/
+
+
+# --- Logs ---------------------------------------------------------------------
+logs/
+*.log
+*.log.*
+pids/
+*.pid
+*.seed
+
+
+# --- Testing ------------------------------------------------------------------
+coverage/
+.nyc_output/
+*.lcov
+
+
+# --- OS files -----------------------------------------------------------------
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+
+# --- Editor / IDE -------------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+*~
+
+
+# --- Redis --------------------------------------------------------------------
+dump.rdb
+*.rdb
+
+
+# --- Misc ---------------------------------------------------------------------
+.cache/
+.temp/
+tmp/
+temp/
+.eslintcache
+.stylelintcache
