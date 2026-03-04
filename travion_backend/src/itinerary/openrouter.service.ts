@@ -3,8 +3,8 @@ import axios from 'axios';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
-// Small, fast, cheap — perfect for NLP parsing and Q-A
-const DEFAULT_MODEL = 'mistralai/mistral-7b-instruct';
+// Small, fast, free — perfect for NLP parsing and Q-A
+const DEFAULT_MODEL = 'mistralai/mistral-7b-instruct:free';
 
 export interface OpenRouterMessage {
   role: 'system' | 'user' | 'assistant';
