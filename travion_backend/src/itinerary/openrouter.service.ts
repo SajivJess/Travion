@@ -3,8 +3,8 @@ import axios from 'axios';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
-// Small, fast, free — perfect for NLP parsing and Q-A
-const DEFAULT_MODEL = 'mistralai/mistral-7b-instruct:free';
+// Google Gemma 3 27B — free tier on OpenRouter, strong NLP and Q-A
+const DEFAULT_MODEL = 'google/gemma-3-27b-it:free';
 
 export interface OpenRouterMessage {
   role: 'system' | 'user' | 'assistant';

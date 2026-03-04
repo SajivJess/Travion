@@ -434,7 +434,7 @@ All variables live in `travion_backend/.env`. Copy `.env.example` (repo root) as
 1. Sign up at [openrouter.ai](https://openrouter.ai)
 2. Profile → **Keys → Create Key**
 3. Free credits on signup; pay-per-token afterwards
-4. Model used: `mistralai/mistral-7b-instruct:free`
+4. Model used: `google/gemma-3-27b-it:free`
 
 ---
 
